@@ -1,18 +1,34 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from brian2 import NeuronGroup, Synapses, StateMonitor, run, defaultclock, ms, second, TimedArray, seed
+from brian2 import NeuronGroup, Synapses, StateMonitor, run, defaultclock, ms, second, TimedArray, seed, \
+                   pF, nS, mV, ms, nA, volt, defaultclock, SpikeMonitor
+from brian2tools import *
 
 # random seed that gives curves similar to the ones in the publication
 seed(9873487)
 
 # neuron parameters (sigmoidal activation)
-beta = 0.03
-epsilon = 120
-F_max = 100
-F_T = 1
+beta = 0.03/volt
+epsilon = 120*volt
+F_max = 100 # maximum firing rate
+F_T = 1 # desired firing rate of system
 tau_u = 1*ms
 R = 0.012
+
+# neuron parameters (AdEx)
+C = 350*pF # https://journals.physiology.org/doi/full/10.1152/jn.00147.2020
+gL = 7*nS
+EL = -70*mV
+VT = -55*mV
+deltaT = 4*mV
+tauw = 144*ms
+A = -0.27*nS
+b = 0.0805*nA
+
+vspike = 30*mV
+
+vreset = -62*mV
 
 # plasticity timescales
 tau_ratio = 60
@@ -44,7 +60,7 @@ defaultclock.dt = DT
 # duration of a learning trial
 lt = 5000*DT
 
-duration = 100*lt
+duration = 100*lt # modified from 100
 no_input_until = 5*lt
 balanced_until = duration/2
 
@@ -67,8 +83,13 @@ stim_B_gate = TimedArray([lt_counter % 2 == 1 if balanced(lt_counter*lt) else lt
 # noise is applied also during stimulation
 neurons = NeuronGroup(N_units,
                       """
-                      F = F_max/(1+exp(beta*(epsilon-u))) : 1
-                      du/dt = (-u + R*(I_E - I_I + W_input*(I_stim_A + I_stim_B)))/tau_u + R*W_ext*20*sqrt((DT/ms)/ms)*xi: 1
+                      # Tetzlaff et al. (2015) model equations
+                      F = F_max/(1+exp(beta*(epsilon-v))) : 1
+                      # du/dt = (-u + R*(I_E - I_I + W_input*(I_stim_A + I_stim_B)))/tau_u + R*W_ext*20*sqrt((DT/ms)/ms)*xi: 1
+                      # AdEx model equations
+                      dv/dt = (gL*(EL-v) + gL*deltaT*exp((v-VT)/deltaT) - o + 0.0001*W_input*(I_stim_A + I_stim_B)*nA)/C + 0.00001*R*W_ext*20*sqrt((DT/ms)/ms)*xi*volt: volt
+                      do/dt=(A*(v-EL)-o)/tauw : amp
+                      # Remainder of Tetzlaff et al. (2015) model equations
                       I_E : 1
                       I_I : 1
                       index : 1 (constant)
@@ -77,8 +98,12 @@ neurons = NeuronGroup(N_units,
                       I_stim_A = learning_phase(t)*int(stim_units_A)*stim_A_gate(t)*stim_func(t) : 1
                       I_stim_B = learning_phase(t)*int(stim_units_B)*stim_B_gate(t)*stim_func(t) : 1
                       """,
+                      threshold='v > vspike',
+                      reset='v=vreset; o += b',
                       method = "euler")
 neurons.index = range(len(neurons))
+
+neurons.v = -70*mV
 
 # excitatory connections with Hebbian plasticity and synaptic scaling
 synapses_E = Synapses(neurons, neurons,
@@ -102,9 +127,10 @@ synapses_I = Synapses(neurons, neurons,
 synapses_I.connect(p=p_I)
 synapses_I.w = W_I
 
-statemon_neurons = StateMonitor(neurons, ["F", "I_stim_A", "I_stim_B"], record=True, dt=100*defaultclock.dt)
+statemon_neurons = StateMonitor(neurons, ["F", "I_stim_A", "I_stim_B", "v", "o"], record=True, dt=100*defaultclock.dt)
 statemon_synapses_E = StateMonitor(synapses_E, "w", record=True, dt=100*defaultclock.dt)
 statemon_synapses_for_assembly_analysis = StateMonitor(synapses_E, "w", record=True, dt=lt)
+spikemon_neurons = SpikeMonitor(neurons)
 
 run(duration, report="text")
 
@@ -191,3 +217,40 @@ fig.tight_layout()
 
 plt.show()
 
+# membrane potential of handful of neurons in assembly
+fig, axe = plt.subplots(2, sharex=True)
+
+axe[0].plot(statemon_neurons.t/ms, statemon_neurons.v[0]/mV, label="A", color="orange")
+axe[0].plot(statemon_neurons.t/ms, statemon_neurons.v[-1]/mV, label="B", color="olivedrab")
+
+"""
+SpikeTimes0 = np.array()
+SpikeTimes100 = np.array()
+for i in len(spikemon_neurons.i):
+    if spikemon_neurons.i(i) == 0:
+        SpikeTimes0.append(spikemon_neurons.t(i))
+    if spikemon_neurons.i(i) == 100:
+        SpikeTimes100.append(spikemon_neurons.t(i))
+
+Spikes0 = np.zeros([1,len(SpikeTimes0)])
+Spikes100 = np.zeros([1,len(SpikeTimes100)])
+
+axe[0].plot(SpikeTimes0, Spikes0, label="A", linestyle="None", marker=".", color="orange")
+axe[0].plot(SpikeTimes100, Spikes100, label="B", linestyle="None", marker="x", color="olivedrab")
+"""
+
+axe[0].set_xlabel("Time")
+axe[0].set_ylabel("Membrane Potential")
+#axe[0].set_ylim([-90, 1]) # set upper limit to 1 in order to see spike locations
+axe[0].legend(loc='upper left')
+
+axe[1].plot(statemon_synapses_E.t/ms, statemon_synapses_E.w[0], label="A", color="orange")
+axe[1].plot(statemon_synapses_E.t/ms, statemon_synapses_E.w[-1], label="B", color="olivedrab")
+axe[1].set_xlabel("Time")
+axe[1].set_ylabel("Weight")
+plt.show()
+
+# raster plot
+brian_plot(spikemon_neurons)
+
+plt.show()
